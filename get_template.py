@@ -6,6 +6,7 @@ from lsst.sims.photUtils import BandpassDict, Sed, Bandpass
 from lsst.utils import getPackageDir
 from lsst.sims.photUtils import cache_LSST_seds, getImsimFluxNorm
 import os
+from astropy.io import fits
 
 class Finder():
     
@@ -15,9 +16,14 @@ class Finder():
         self.lsst_bplist = np.array(['u','g','r','i','z','y'])
         self.file_s_e = np.load('/global/cscratch1/sd/zg64/Rubin-Roman-Redmagic/lookup_file_list_range.npy')
         self.sed_look_dir = "/global/projecta/projectdirs/lsst/groups/SSim/DC2/cosmoDC2_v1.1.4/sedLookup/"
-        self._galaxy_sed_dir = os.path.join(getPackageDir('sims_sed_library'))
+        self._galaxy_sed_dir = os.path.join('/cvmfs/sw.lsst.eu/linux-x86_64/lsst_sims/sims_2_13_1/stack/miniconda3-4.5.4-fcd27eb/Linux64/sims_sed_library/2017.01.24')
         self.lookupfile = os.listdir(self.sed_look_dir)
         self.lsst_bp_dict,self.dummy_bp_dict = BandpassDict.loadBandpassesFromFiles()
+        
+        # Load Roman Truth catalog
+        Roman_truth_file = '/global/cscratch1/sd/zg64/Rubin-Roman-Redmagic/dc2_truth_gal_icrs.fits'
+        hdu = fits.open(Roman_truth_file)
+        self.roman_data = hdu[1].data
         
     def find_h5_file (self, gal_id):
 
@@ -27,12 +33,12 @@ class Finder():
                     which_h5file = i + 1
                 else:
                     which_h5file = i
-                print('SED LookupFile: ', self.lookupfile[which_h5file])
+                #print('SED LookupFile: ', self.lookupfile[which_h5file])
         return(which_h5file)
     
     
     
-    def find_target_sed(self,gal_id, plot = True, calc = True):
+    def find_target_sed(self,gal_id, plot = True, calc = True,verbose = False):
     
         h5f_id = self.find_h5_file(gal_id=gal_id)
         look_file = self.sed_look_dir + self.lookupfile[h5f_id]
@@ -53,8 +59,9 @@ class Finder():
         bulge_spec.readSED_flambda(os.path.join(self._galaxy_sed_dir, target_bulge_sed))
         disk_spec = Sed()
         disk_spec.readSED_flambda(os.path.join(self._galaxy_sed_dir, target_disk_sed))
-        print('SED template (bulge): ',target_bulge_sed)
-        print('SED template (disk): ',target_disk_sed)
+        if verbose == True:
+            print('SED template (bulge): ',target_bulge_sed)
+            print('SED template (disk): ',target_disk_sed)
         if plot == True:
             fig,ax = plt.subplots(1,1,figsize = (8,6))
             ax2 = ax.twinx()
@@ -76,9 +83,9 @@ class Finder():
             return(hf,idx)
 
 
-    def calc_color (self,gal_id,colors):
+    def calc_color (self,gal_id,colors,verbose = False):
         lsst_bplist = np.array(['u','g','r','i','z','y'])
-        hfile,ID,bulge_spec,disk_spec = self.find_target_sed(gal_id=gal_id, plot = False)
+        hfile,ID,bulge_spec,disk_spec = self.find_target_sed(gal_id=gal_id, plot = False,verbose = verbose)
         color_comb = list()
         for c in colors:
             color_comb.append( np.where(lsst_bplist == c)[0][0])
@@ -112,7 +119,7 @@ class Finder():
         return(mags)
 
     def calc_colors (self,gal_id,file_save = True):
-        hfile,ID,bulge_s,disk_s = self.find_target_sed(gal_id=gal_id, plot = False)
+        hfile,ID,bulge_s,disk_s = self.find_target_sed(gal_id=gal_id, plot = False,verbose = verbose)
         disk_magnorm = hfile['disk_magnorm'][0][ID]
         bulge_magnorm = hfile['bulge_magnorm'][0][ID]
         redshift = hfile['redshift'][ID]
@@ -144,3 +151,33 @@ class Finder():
             np.save('data/single_gal_cali_u_%i'%gal_id,np.array(color))
         else:   
             return(np.array(mags),bulge_s.wavelen,bulge_s.flambda+disk_s.flambda)
+
+    def calc_roman_color (self,gal_id,roman_gal_idx,verbose = False,check = False):
+
+        gal_info = self.roman_data[roman_gal_idx]
+
+        hfile,ID,bulge_s,disk_s = self.find_target_sed(gal_id=gal_id, plot = False,verbose = verbose)
+        disk_magnorm = gal_info['mag_norm'][1]
+        bulge_magnorm = gal_info['mag_norm'][0]
+        redshift = gal_info['z']
+        if check == True:
+            print('------------------')
+            print('redshift:', hfile['redshift'][ID],redshift)
+            print('disk_av:',hfile['disk_av'][ID],gal_info['A_v'][1])
+            print('disk_rv:',hfile['disk_rv'][ID],gal_info['R_v'][1])
+            print('bulge_av:',hfile['bulge_av'][ID],gal_info['A_v'][0])
+            print('bulge_rv:',hfile['bulge_rv'][ID],gal_info['R_v'][0])
+        fnorm = getImsimFluxNorm(disk_s, disk_magnorm)
+        disk_s.multiplyFluxNorm(fnorm)
+        ax, bx = disk_s.setupCCM_ab()
+        disk_s.addDust(ax, bx, A_v=gal_info['A_v'][1], R_v=gal_info['R_v'][1])
+
+        fnorm = getImsimFluxNorm(bulge_s, bulge_magnorm)
+        bulge_s.multiplyFluxNorm(fnorm)
+        ax, bx = bulge_s.setupCCM_ab()
+        bulge_s.addDust(ax, bx, A_v=gal_info['A_v'][0], R_v=gal_info['R_v'][0])
+
+        spec_f = Sed(wavelen =  bulge_s.wavelen , flambda = bulge_s.flambda+disk_s.flambda)
+        spec_f.redshiftSED(redshift,dimming = True)
+        maglist = self.lsst_bp_dict.magListForSed(spec_f)
+        return(maglist)
